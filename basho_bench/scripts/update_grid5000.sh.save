@@ -1,0 +1,17 @@
+#!/bin/bash
+
+BENCHMARK_HOME=/home/nca/Desktop/gesto-sandbox/saturn_benchmark
+SATURN_LEAF_HOME=$BENCHMARK_HOME/saturn_leaf
+BASHO_HOME=$BENCHMARK_HOME/basho_bench
+USER=nuafonso
+HOST=access.grid5000.fr
+
+# Avoid copying binary files
+sudo rm -rf $SATURN_LEAF_HOME/deps
+sudo rm -rf $SATURN_LEAF_HOME/ebin
+sudo rm -rf $BASHO_HOME
+/deps
+sudo rm -rf $BASHO_HOME/ebin
+
+# Spread over all Grid 5000 locations
+scp -rp $SATURN_LEAF_HOME $USER@$HOST:.

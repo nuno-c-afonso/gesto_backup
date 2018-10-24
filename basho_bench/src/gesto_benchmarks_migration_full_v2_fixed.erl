@@ -1,0 +1,647 @@
+-module(gesto_benchmarks_migration_full_v2_fixed).
+
+-export([new/1,
+         run/4]).
+
+-include("basho_bench.hrl").
+
+-record(state, {node,
+                nodes,
+                clock,
+                mydc,
+                id,
+                correlation,
+                local_buckets,
+                remote_buckets,
+                ordered_latencies,
+                total_dcs,
+                remote_tx,
+                key_tx,
+                buckets_map,
+                local_label,
+                remote_label}).
+
+%% ====================================================================
+%% API
+%% ====================================================================
+
+new(Id) ->
+    Nodes = basho_bench_config:get(saturn_dc_nodes),
+    Correlation = basho_bench_config:get(saturn_correlation),
+    MyNode = basho_bench_config:get(saturn_mynode),
+    MyDc = basho_bench_config:get(saturn_dc_id),
+    BucketsFileName = basho_bench_config:get(saturn_buckets_file),
+    TreeFileName = basho_bench_config:get(saturn_tree_file),
+    RemoteTx = basho_bench_config:get(saturntx_remote_percentage),
+    KeyTx = basho_bench_config:get(saturntx_n_key),
+    
+
+    {ok, BucketsFile} = file:open(BucketsFileName, [read]),
+    Name = list_to_atom(integer_to_list(Id) ++ atom_to_list(buckets)),
+    BucketsMap = ets:new(Name, [set, named_table]),
+    {ok, {LocalBuckets, RemoteBuckets}} = get_buckets_from_file(BucketsFile, MyDc, [], [], BucketsMap),
+    file:close(BucketsFile),
+
+    {ok, TreeFile} = file:open(TreeFileName, [read]),
+    {ok, {LatenciesOrdered, _NumberLines}} = get_tree_from_file(TreeFile, MyDc, 0, []),
+    %% Quick fix for allowing explicit migration
+    NumberDcs = length(Nodes),
+    file:close(TreeFile),
+
+    case net_kernel:start(MyNode) of
+        {ok, _} ->
+            ?INFO("Net kernel started as ~p\n", [node()]);
+        {error, {already_started, _}} ->
+            ?INFO("Net kernel already started as ~p\n", [node()]),
+            ok;
+        {error, Reason} ->
+            ?FAIL_MSG("Failed to start net_kernel for ~p: ~p\n", [?MODULE, Reason])
+    end,
+    Node = lists:nth((MyDc rem length(Nodes)+1), Nodes),
+    Cookie = basho_bench_config:get(saturn_cookie),
+    true = erlang:set_cookie(node(), Cookie),
+
+    ok = ping_each(Nodes),
+
+    case Id of
+        1 ->
+            ok = rpc:call(Node, saturn_leaf, clean, [MyDc]),
+            timer:sleep(5000);
+        _ ->
+            noop
+    end,
+    
+    State = #state{node=Node,
+                   nodes=Nodes,
+                   clock=0,
+                   mydc=MyDc,
+                   remote_tx=RemoteTx,
+                   key_tx=KeyTx,
+                   correlation=Correlation,
+                   local_buckets=LocalBuckets,
+                   remote_buckets=RemoteBuckets,
+                   ordered_latencies=LatenciesOrdered,
+                   total_dcs=NumberDcs,
+                   buckets_map=BucketsMap,
+                   id=Id,
+                   local_label=empty,
+                   remote_label=empty},
+    %lager:info("Worker ~p state: ~p", [Id, State]),
+    %log_state(State),
+    %lager:info("Worker ~p latencies: ~p", [Id, LatenciesOrdered]),
+    {ok, State}.
+
+get_tree_from_file(Device, MyDc, Counter, OrderedList) ->
+    case file:read_line(Device) of
+        eof ->
+            case (Counter > MyDc) of
+                true ->
+                    {ok, {OrderedList, Counter}};
+                false ->
+                    {error, not_enough}
+            end;
+        {error, Reason} ->
+            lager:error("Problem reading ~p file, reason: ~p", [friends_file, Reason]),
+            {error, Reason};
+        {ok, Line} ->
+            case Counter of
+                MyDc ->
+                    %lager:info("my row: ~p", [Line]),
+                    ListString = string:tokens(hd(string:tokens(Line,"\n")), ","),
+                    {List, _} = lists:foldl(fun(LatencyString, {Acc, DcId}) ->
+                                                {Latency, []} = string:to_integer(LatencyString),
+                                                {orddict:store(Latency, DcId, Acc), DcId+1}
+                                            end, {orddict:new(), 0}, ListString),
+                    get_tree_from_file(Device, MyDc, Counter+1, List);
+                _ ->
+                    get_tree_from_file(Device, MyDc, Counter+1, OrderedList)
+            end
+    end.
+
+get_buckets_from_file(Device, MyDc, Local, Remote, Map) ->
+    case file:read_line(Device) of
+        eof ->
+            {ok, {Local, Remote}};
+        {error, Reason} ->
+            lager:error("Problem reading ~p file, reason: ~p", [friends_file, Reason]),
+            {error, Reason};
+        {ok, Line} ->
+            [BucketString|ReplicasString] = string:tokens(hd(string:tokens(Line,"\n")), ","),
+            {Bucket, []} = string:to_integer(BucketString),
+            Replicas = lists:foldl(fun(Replica, Acc) ->
+                                    {Int, []} = string:to_integer(Replica),
+                                    [Int|Acc]
+                                   end, [], ReplicasString),
+            %lager:info("Inserted to ets: ~p, ~p", [lists:sort(Replicas), Bucket]),
+            true = ets:insert(Map, {lists:sort(Replicas), Bucket}),
+            case lists:member(MyDc, Replicas) of
+                true ->
+                    get_buckets_from_file(Device, MyDc, [Bucket|Local], Remote, Map);
+                false ->
+                    get_buckets_from_file(Device, MyDc, Local, [Bucket|Remote], Map)
+            end
+    end.
+
+%% Full replication on bucket 6
+pick_local_bucket(_, _, _, _, _) ->
+    {ok, 6}.
+
+pick_local_bucket(_, _) ->
+    {ok, 6}.
+
+pick_remote_bucket(_, _, _, _) ->
+    {ok, 6}.
+
+pick_remote_bucket(_, _) ->
+    {ok, 6}.
+
+get_bucket_proportional(LatenciesOrderedDcs, NumberDcs) ->    
+    {_, DCs} = lists:foldl(fun({_Latency, DC}, {Counter, List}) ->
+                            Portion = trunc(100/NumberDcs),
+                            Prob = (NumberDcs-Counter)*Portion,
+                            case random:uniform(100) =< Prob of
+                                true ->
+                                    {Counter + 1, [DC|List]};
+                                false ->
+                                    {Counter + 1, List}
+                            end
+                           end, {1, []}, LatenciesOrderedDcs),
+    DCs.
+
+get_bucket_exponential(LatenciesOrderedDcs, NumberDcs) ->    
+    {_ ,DCs} = lists:foldl(fun({_Latency, DC}, {Counter, List}) ->
+                            Max = math:pow(2, NumberDcs),
+                            Upper = math:pow(2, (NumberDcs - Counter)) * 100,
+                            Prob = trunc(Upper/Max),
+                            case random:uniform(100) =< Prob of
+                                true ->
+                                    {Counter + 1, [DC|List]};
+                                false ->
+                                    {Counter + 1, List}
+                            end
+                           end, {1, []}, LatenciesOrderedDcs),
+    DCs.
+
+get_bkeys(0, _KeyGen, BKeys, _S0) ->
+    BKeys;
+
+get_bkeys(Rest, KeyGen, BKeys, S0=#state{remote_tx=PercentageRemote,
+                                 correlation=Correlation,
+                                 local_buckets=LocalBuckets,
+                                 remote_buckets=RemoteBuckets,
+                                 ordered_latencies=OrderedLatencies,
+                                 buckets_map=BucketsMap,
+                                 mydc=MyDc,
+                                 total_dcs=NumberDcs}) ->
+    Type = case (PercentageRemote>random:uniform(100)) of
+        true -> remote;
+        false -> local
+    end,
+    {ok, Bucket} = case {Type, Correlation} of
+        {local, uniform} ->
+            pick_local_bucket(uniform, LocalBuckets);
+        {remote, uniform} ->
+            pick_remote_bucket(uniform, RemoteBuckets);
+        {local, _} ->
+            pick_local_bucket(Correlation, OrderedLatencies, MyDc, NumberDcs, BucketsMap);
+        {remote, _} ->
+            pick_remote_bucket(Correlation, OrderedLatencies, NumberDcs, BucketsMap);
+        {_, full} ->
+            {ok, trunc(math:pow(2,NumberDcs) - 2)}
+    end,
+    Key = generate_key(KeyGen, Bucket, BKeys),
+    get_bkeys(Rest-1, KeyGen, [{Bucket, Key}|BKeys], S0).
+
+generate_key(KeyGen, Bucket, BKeys) -> 
+    Key = KeyGen(),
+    case lists:member({Bucket, Key}, BKeys) of
+        true ->
+            generate_key(KeyGen, Bucket, BKeys);
+        false ->
+            Key
+    end.
+
+run(read, KeyGen, _ValueGen, #state{node=Node,
+                                     clock=Clock0,
+                                     correlation=Correlation,
+                                     local_buckets=LocalBuckets,
+                                     ordered_latencies=OrderedLatencies,
+                                     buckets_map=BucketsMap,
+                                     mydc=MyDc,
+                                     total_dcs=NumberDcs,
+                                     local_label=LocalLabel0,
+                                     remote_label=RemoteLabel0}=S0) ->
+    {ok, Bucket} = case Correlation of
+        uniform ->
+            pick_local_bucket(uniform, LocalBuckets);
+        full ->
+            {ok, trunc(math:pow(2, NumberDcs) - 2)};
+        _ ->
+            pick_local_bucket(Correlation, OrderedLatencies, MyDc, NumberDcs, BucketsMap)
+    end,
+    
+    BKey = {Bucket, KeyGen()},
+    Result = gen_server:call(server_name(Node), {read, BKey, Clock0}, infinity),
+    case Result of
+        {ok, {_Value, TimeStamp}} ->
+            Clock1 = max(TimeStamp, Clock0),
+            case LocalLabel0 of
+                empty ->
+                    {ok, S0#state{clock=Clock1, local_label={MyDc, Bucket, TimeStamp}}};
+                {_, _, Timestamp0} ->
+                    case TimeStamp > Timestamp0 of
+                        true ->
+                            {ok, S0#state{clock=Clock1, local_label={MyDc, Bucket, TimeStamp}}};
+                        false ->
+                            {ok, S0#state{clock=Clock1}}
+                    end
+            end;
+        {ok, {_Value, TimeStamp, Sender, SerializerClock}} ->
+            Clock1 = max(TimeStamp, Clock0),
+            case RemoteLabel0 of
+                empty ->
+                    {ok, S0#state{clock=Clock1, remote_label={Sender, Bucket, SerializerClock}}};
+                {_, _, SerializerClock0} ->
+                    case SerializerClock > SerializerClock0 of
+                        true ->
+                            {ok, S0#state{clock=Clock1, remote_label={Sender, Bucket, SerializerClock}}};
+                        false ->
+                            {ok, S0#state{clock=Clock1}}
+                    end
+            end;
+        Else ->
+            {error, Else}
+    end;
+
+run(read_tx, KeyGen, _ValueGen, #state{node=Node,
+                                        key_tx=NKeys,
+                                        clock=Clock0}=S0) ->
+    BKeys = get_bkeys(NKeys, KeyGen, [], S0),
+    Result = gen_server:call(server_name(Node), {read_tx, BKeys, Clock0}, infinity),
+    case Result of
+        {ok, {_Value, TimeStamp}} ->
+            Clock1 = max(TimeStamp, Clock0),
+            {ok, S0#state{clock=Clock1}};
+        Else ->
+            {error, Else}
+    end;
+
+run(remote_read, KeyGen, _ValueGen, #state{nodes=Nodes,
+                                            node=MyNode,
+                                            buckets_map=BucketsMap,
+                                            total_dcs=NumberDcs,
+                                            mydc=MyDc,
+                                            local_label=LocalLabel0,
+                                            remote_label=RemoteLabel0}=S0) ->
+    %% Choose new replica
+    Id = case MyDc of
+        %% My replica is the datacenter
+        0 ->
+            get_random_dc_id(MyDc, NumberDcs);
+        %% I am on a cloudlet (must go to the datacenter)
+        _ ->
+            0
+    end,
+    Node = get_node_from_id(Id, NumberDcs, Nodes),
+
+    %% Check what type of migration to do
+    {LocalBuckets1, RemoteBuckets1, LatenciesOrdered} = update_local_dc(Id, BucketsMap),
+    CheckRemoteLabel = case LocalLabel0 of
+        empty ->
+            true;
+        {MyDc, Bucket, _} ->
+            lists:member(Bucket, LocalBuckets1)
+    end,
+    case CheckRemoteLabel of
+        true ->
+            case RemoteLabel0 of
+                empty ->
+                    noop;
+                {SenderR, BucketR, _} ->
+                    case Id of
+                        %% The sender will have information replicated
+                        SenderR ->
+                            noop;
+                        _ ->
+                            case BucketR of
+                                migration ->
+                                    %% The destination will not receive the label
+                                    ok = gen_server:call(server_name(MyNode), {migration_partial, MyDc, Id}, infinity);
+                                _ ->
+                                    case lists:member(BucketR, LocalBuckets1) of
+                                        true ->
+                                            noop;
+                                        false ->
+                                            %% The destination will not receive the label
+                                            ok = gen_server:call(server_name(MyNode), {migration_partial, MyDc, Id}, infinity)
+                                    end
+                            end
+                    end                    
+            end;
+        false ->
+            %% The local label's bucket is not replicated in the destination
+            ok = gen_server:call(server_name(MyNode), {migration_partial, MyDc, Id}, infinity)
+    end,
+
+    %% Same migration as full replication
+    LocalLabel1 = case LocalLabel0 of
+        empty ->
+            empty;
+        {MyDc, _, Timestamp} ->
+            {MyDc, Timestamp}
+    end,
+    RemoteLabel1 = case RemoteLabel0 of
+        empty ->
+            empty;
+        {Sender, _, Counter} ->
+            {Sender, Counter}
+    end,
+
+    Result = gen_server:call(server_name(Node), {migration, Id, LocalLabel1, RemoteLabel1}, infinity),
+    case Result of
+        {ok, SerializerClock} ->
+            {ok, S0#state{node=Node,
+                            mydc=Id,
+                            local_buckets=LocalBuckets1,
+                            remote_buckets=RemoteBuckets1,
+                            ordered_latencies=LatenciesOrdered,
+                            local_label=empty,
+                            remote_label=SerializerClock}};
+        Else ->
+            {error, Else}
+    end;
+
+%% TODO: This was not adapted to the hybrid version
+%% To be used for testing the transition from a cloudlet to another cloudlet
+run(double_migration_different, KeyGen, _ValueGen, #state{node=Node,
+                                            nodes=Nodes,
+                                            mydc=MyDc,
+                                            clock=Clock0,
+                                            correlation=Correlation,
+                                            remote_buckets=RemoteBuckets,
+                                            ordered_latencies=OrderedLatencies,
+                                            buckets_map=BucketsMap,
+                                            total_dcs=NumberDcs}=S0) ->
+    {ok, Bucket} = case Correlation of
+        uniform ->
+            pick_remote_bucket(uniform, RemoteBuckets);
+        full ->
+            {ok, trunc(math:pow(2, NumberDcs) - 2)};
+        _ ->
+            pick_remote_bucket(Correlation, OrderedLatencies, NumberDcs, BucketsMap)
+    end,
+    BKey = {Bucket, KeyGen()},
+
+    %%%%%%%%%%%%%%%%%%%%%
+    %% First migration %%
+    %%%%%%%%%%%%%%%%%%%%%
+    Result1 = gen_server:call(server_name(Node), {read, BKey, Clock0}, infinity),
+    case Result1 of
+        {ok, {Id, TimeStamp1}} ->
+            Node1 = get_node_from_id(Id, NumberDcs, Nodes),
+            Result2 = gen_server:call(server_name(Node1), {read, BKey, MyDc, TimeStamp1, Id}, infinity),
+            case Result2 of
+                {ok, {_Value, TimeStamp2}} ->
+                    Clock1 = max(TimeStamp2, Clock0),
+                    {ok, IdFinal} = get_different_id(MyDc, Id, NumberDcs),
+                    
+                    %% Each DC has an unique bucket, which corresponds to its Id
+                    BKey1 = {IdFinal, KeyGen()},
+                    
+                    %%%%%%%%%%%%%%%%%%%%%%
+                    %% Second migration %%
+                    %%%%%%%%%%%%%%%%%%%%%%
+                    Result3 = gen_server:call(server_name(Node1), {read, BKey1, Clock1}, infinity),
+                    case Result3 of
+                        {ok, {IdFinal, TimeStamp3}} ->
+                            Node2 = get_node_from_id(IdFinal, NumberDcs, Nodes),
+                            Result4 = gen_server:call(server_name(Node2), {read, BKey1, Id, TimeStamp3, IdFinal}, infinity),
+                            case Result4 of
+                                {ok, {_Value2, TimeStamp4}} ->
+                                    Clock2 = max(TimeStamp4, Clock1),
+                                    {LocalBuckets1, RemoteBuckets1, LatenciesOrdered} = update_local_dc(IdFinal, BucketsMap),
+                                    {ok, S0#state{clock=Clock2,
+                                                node=Node2,
+                                                mydc=IdFinal,
+                                                local_buckets=LocalBuckets1,
+                                                remote_buckets=RemoteBuckets1,
+                                                ordered_latencies=LatenciesOrdered}};
+                                Else ->
+                                    {error, Else}
+                            end;
+                        Else ->
+                            {error, Else}
+                    end;
+                Else ->
+                    {error, Else}
+            end;
+        Else ->
+            {error, Else}
+    end;
+
+%% TODO: This was not adapted to the hybrid version
+%% To be used for testing the transition from a cloudlet to the DC and coming back
+run(double_migration_same, KeyGen, _ValueGen, #state{node=Node,
+                                            nodes=Nodes,
+                                            mydc=MyDc,
+                                            clock=Clock0,
+                                            correlation=Correlation,
+                                            remote_buckets=RemoteBuckets,
+                                            ordered_latencies=OrderedLatencies,
+                                            buckets_map=BucketsMap,
+                                            total_dcs=NumberDcs}=S0) ->
+    {ok, Bucket} = case Correlation of
+        uniform ->
+            pick_remote_bucket(uniform, RemoteBuckets);
+        full ->
+            {ok, trunc(math:pow(2, NumberDcs) - 2)};
+        _ ->
+            pick_remote_bucket(Correlation, OrderedLatencies, NumberDcs, BucketsMap)
+    end,
+    BKey = {Bucket, KeyGen()},
+
+    %%%%%%%%%%%%%%%%%%%%%
+    %% First migration %%
+    %%%%%%%%%%%%%%%%%%%%%
+    Result1 = gen_server:call(server_name(Node), {read, BKey, Clock0}, infinity),
+    case Result1 of
+        {ok, {Id, TimeStamp1}} ->
+            Node1 = get_node_from_id(Id, NumberDcs, Nodes),
+            Result2 = gen_server:call(server_name(Node1), {read, BKey, MyDc, TimeStamp1, Id}, infinity),
+            case Result2 of
+                {ok, {_Value, TimeStamp2}} ->
+                    Clock1 = max(TimeStamp2, Clock0),                    
+                    %% Each DC has an unique bucket, which corresponds to its Id
+                    BKey1 = {MyDc, KeyGen()},
+                    
+                    %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+                    %% Second migration: Return to the original replica %%
+                    %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+                    Result3 = gen_server:call(server_name(Node1), {read, BKey1, Clock1}, infinity),
+                    case Result3 of
+                        {ok, {MyDc, TimeStamp3}} ->
+                            Result4 = gen_server:call(server_name(Node), {read, BKey1, Id, TimeStamp3, MyDc}, infinity),
+                            case Result4 of
+                                {ok, {_Value2, TimeStamp4}} ->
+                                    Clock2 = max(TimeStamp4, Clock1),
+                                    {ok, S0#state{clock=Clock2}};
+                                Else ->
+                                    {error, Else}
+                            end;
+                        Else ->
+                            {error, Else}
+                    end;
+                Else ->
+                    {error, Else}
+            end;
+        Else ->
+            {error, Else}
+    end;
+
+run(write_tx, KeyGen, ValueGen, #state{node=Node,
+                                        key_tx=NKeys,
+                                        clock=Clock0}=S0) ->
+    BKeys = get_bkeys(NKeys, KeyGen, [], S0),
+    Pairs = [{BKey, ValueGen()} || BKey <- BKeys],
+    Result = gen_server:call(server_name(Node), {write_tx, Pairs, Clock0}, infinity),
+    case Result of
+        {ok, Clock1} ->
+            {ok, S0#state{clock=Clock1}};
+        Else ->
+            {error, Else}
+    end;
+
+run(update, KeyGen, ValueGen, #state{node=Node,
+                                      clock=Clock0,
+                                      correlation=Correlation,
+                                      ordered_latencies=OrderedLatencies,
+                                      buckets_map=BucketsMap,
+                                      mydc=MyDc,
+                                      total_dcs=NumberDcs,
+                                      local_buckets=LocalBuckets}=S0) ->
+    {ok, Bucket} = case Correlation of
+        uniform ->
+            pick_local_bucket(uniform, LocalBuckets);
+        full ->
+            {ok, trunc(math:pow(2, NumberDcs) - 2)};
+        _ ->
+            pick_local_bucket(Correlation, OrderedLatencies, MyDc, NumberDcs, BucketsMap)
+    end,
+
+    BKey = {Bucket, KeyGen()},
+    Result = gen_server:call(server_name(Node), {update, BKey, ValueGen(), Clock0}, infinity),
+    case Result of
+        {ok, Clock1} ->
+            {ok, S0#state{clock=Clock1, local_label={MyDc, Bucket, Clock1}}};
+        Else ->
+            {error, Else}
+    end;
+
+run(remote_update, KeyGen, ValueGen, #state{node=Node,
+                                             clock=Clock0,
+                                             correlation=Correlation,
+                                             remote_buckets=RemoteBuckets,
+                                             ordered_latencies=OrderedLatencies,
+                                             buckets_map=BucketsMap,
+                                             total_dcs=NumberDcs}=S0) ->
+    {ok, Bucket} = case Correlation of
+        uniform ->
+            pick_remote_bucket(uniform, RemoteBuckets);
+        full ->
+            {ok, trunc(math:pow(2, NumberDcs) - 2)};
+        _ ->
+            pick_remote_bucket(Correlation, OrderedLatencies, NumberDcs, BucketsMap)
+    end,
+    BKey = {Bucket, KeyGen()},
+    Result = gen_server:call(server_name(Node), {update, BKey, ValueGen(), Clock0}, infinity),
+    %Result = rpc:call(Node, saturn_leaf, update, [BKey, value, Clock0]),
+    case Result of
+        {ok, Clock1} ->
+            {ok, S0#state{clock=Clock1}};
+        Else ->
+            {error, Else}
+    end.
+
+%% ====================================================================
+%% Internal functions
+%% ====================================================================
+
+ping_each([]) ->
+    ok;
+ping_each([Node | Rest]) ->
+    case net_adm:ping(Node) of
+        pong ->
+            ping_each(Rest);
+        pang ->
+            ?FAIL_MSG("Failed to ping node ~p\n", [Node])
+    end.
+
+server_name(Node)->
+    {saturn_client_receiver, Node}.
+    %{global, list_to_atom(atom_to_list(Node) ++ atom_to_list(saturn_client_receiver))}.
+
+get_node_from_id(Id, NumberDcs, Nodes) ->
+    lists:nth((Id rem NumberDcs+1), Nodes).
+
+update_local_dc(Id, BucketsMap) ->
+    %% Update local and remote buckets
+    BucketsFileName = basho_bench_config:get(saturn_buckets_file),
+    {ok, BucketsFile} = file:open(BucketsFileName, [read]),
+    ets:delete_all_objects(BucketsMap),
+    {ok, {LocalBuckets, RemoteBuckets}} = get_buckets_from_file(BucketsFile, Id, [], [], BucketsMap),
+    file:close(BucketsFile),
+    
+    %% Update ordered latencies
+    TreeFileName = basho_bench_config:get(saturn_tree_file),
+    {ok, TreeFile} = file:open(TreeFileName, [read]),
+    {ok, {LatenciesOrdered, _NumberLines}} = get_tree_from_file(TreeFile, Id, 0, []),
+    file:close(TreeFile),
+
+    {LocalBuckets, RemoteBuckets, LatenciesOrdered}.
+
+%% Start of get_different_id/3
+get_different_id(MyDc, Id, NumberDcs) ->
+    get_different_id_tail(MyDc, Id, NumberDcs, 0).
+
+get_different_id_tail(MyDc, Id, NumberDcs, Index) ->
+    case Index < NumberDcs of
+        true ->
+            case (Index == MyDc) or (Index == Id) of
+                true ->
+                    get_different_id_tail(MyDc, Id, NumberDcs, Index + 1);
+                false ->
+                    {ok, Index}
+            end;
+        false ->
+            {error, "Impossible to get a different Id."}
+    end.
+%% End of get_different_id/3
+
+%% Start of get_random_dc_id/2
+get_random_dc_id(MyDc, NumberDcs) ->
+    get_random_dc_id_tail(MyDc, NumberDcs, random:uniform(NumberDcs) - 1).
+
+get_random_dc_id_tail(MyDc, NumberDcs, NewDc) ->
+    case MyDc == NewDc of
+        true ->
+            get_random_dc_id_tail(MyDc, NumberDcs, random:uniform(NumberDcs) - 1);
+        false ->
+            NewDc
+    end.
+%% End of get_random_dc_id/2
+
+log_state(State) ->
+    lager:info("Worker ~p state:~nNode:~p~nNodes:~p~nClock:~p~nMyDC:~p~nRemote_TX:~p~nKey_TX:~p~nCorrelation:~p~nLocal_Buckets:~p~nRemote_Buckets:~p~nOrdered_Latencies:~p~nTotalDCs:~p~nBuckets_Map:~p",
+    [State#state.id,
+     State#state.node,
+     State#state.nodes,
+     State#state.clock,
+     State#state.mydc,
+     State#state.remote_tx,
+     State#state.key_tx,
+     State#state.correlation,
+     State#state.local_buckets,
+     State#state.remote_buckets,
+     State#state.ordered_latencies,
+     State#state.total_dcs,
+     State#state.buckets_map]).

@@ -1,0 +1,5 @@
+.beam
+tests/.*$
+basho_bench$
+erl_crash.dump$
+deps/.*$

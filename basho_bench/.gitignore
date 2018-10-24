@@ -1,0 +1,13 @@
+ebin/
+deps/
+tests/
+results/
+/basho_bench
+/rel/basho_bench
+package
+.rebar
+*~
+#*#
+*.beam
+*.dump
+*.swp
