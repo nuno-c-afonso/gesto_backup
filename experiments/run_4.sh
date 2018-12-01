@@ -39,24 +39,27 @@ mv src/basho_bench_stats_writer_csv.erl src/basho_bench_stats_writer_csv.erl.OLD
 cp ../adapted_deps/basho_bench_stats_writer_csv.erl src
 scripts/update_basho_src.sh basho_bench/src basho_bench/src "$BENCH $MANAGER"
 
-##############
-## EVENTUAL ##
-##############
-scripts/update_leaf_src.sh eventual saturn_leaf "$NODES"
-run_benchmark "saturn_benchmarks_da_eventual"
+# ##############
+# ## EVENTUAL ##
+# ##############
+# scripts/update_leaf_src.sh eventual saturn_leaf "$NODES"
+# run_benchmark "saturn_benchmarks_da_eventual"
 
-##################
-## GESTO NORMAL ##
-##################
-scripts/update_leaf_src.sh gesto_partial_concurrent saturn_leaf "$NODES"
-run_benchmark "gesto_benchmarks_migration_partial_free_concurrent"
+# ##################
+# ## GESTO NORMAL ##
+# ##################
+# scripts/update_leaf_src.sh gesto_partial_concurrent saturn_leaf "$NODES"
+# run_benchmark "gesto_benchmarks_migration_partial_free_concurrent"
 
-###########################
-## GESTO RECONFIGURATION ##
-###########################
+# FIXME: This is just a run for debugging the code!
+# TODO: For now, the initial client is still valid. In the future, develop a new one for coping with the directory service.
+# gesto_partial_reconfiguration_dir_service
+##########################
+# GESTO RECONFIGURATION ##
+##########################
 # This is the special case that needs to sync the events with basho
-# scripts/update_leaf_src.sh gesto_partial_reconfiguration saturn_leaf "$NODES"
-# run_benchmark "gesto_benchmarks_reconfig"
+scripts/update_leaf_src.sh gesto_partial_reconfiguration saturn_leaf "$NODES"
+run_benchmark "gesto_benchmarks_reconfig"
 
 # Reset the report time for the other benchmarks
 mv ${BENCHMARK_CONFIG_FILE}_original $BENCHMARK_CONFIG_FILE

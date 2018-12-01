@@ -22,9 +22,27 @@ add_ssh_key="eval \"\$(ssh-agent -s)\"; ssh-add .ssh/$KEYNAME"
 COL_UPDATE=6
 COL_READ=8
 
+# Number of reads before an update
+# STEP=50
+# STEP_MAX=150
+STEP=1
+# STEP_MAX=15
+STEP_MAX=57
+N_UPDATES=1
+# n_reads=( 25 50 100 150 )
+n_reads=( )
+
+# Build the array
+# i=$STEP
+i=57
+while [ $i -le $STEP_MAX ]
+do
+    n_reads+=($i)
+    let i+=$STEP
+done
+
 function run_benchmark {
     driver=$1
-    n_reads=( 25 50 100 150 200 )
 
     # Repeat the experiment for the different read percentages
     for r_number in ${n_reads[@]}
@@ -40,7 +58,7 @@ function run_benchmark {
             # Fix the amount of updates to 1
             if [ $col_counter -eq $COL_UPDATE ]
             then
-                new_line="${new_line}1 "
+                new_line="${new_line}$N_UPDATES "
             elif [ $col_counter -eq $COL_READ ]
             then
                 new_line="$new_line$r_number "
@@ -69,11 +87,11 @@ mv src/basho_bench_stats_writer_csv.erl src/basho_bench_stats_writer_csv.erl.OLD
 cp ../adapted_deps/basho_bench_stats_writer_csv.erl src
 scripts/update_basho_src.sh basho_bench/src basho_bench/src "$BENCH $MANAGER"
 
-#########################
-## COMPLETELY EVENTUAL ##
-#########################
-scripts/update_leaf_src.sh eventual_remote_updates saturn_leaf "$NODES"
-run_benchmark "saturn_benchmarks_da_eventual_remote_updates"
+# #########################
+# ## COMPLETELY EVENTUAL ##
+# #########################
+# scripts/update_leaf_src.sh eventual_remote_updates saturn_leaf "$NODES"
+# run_benchmark "saturn_benchmarks_da_eventual_remote_updates"
 
 ##################
 ## COPS VANILLA ##
@@ -81,11 +99,11 @@ run_benchmark "saturn_benchmarks_da_eventual_remote_updates"
 scripts/update_leaf_src.sh cops_vanilla_remote_updates saturn_leaf "$NODES"
 run_benchmark "saturn_benchmarks_da_vanilla_cops"
 
-################
-## GESTO_FULL ##
-################
-scripts/update_leaf_src.sh gesto_partial_concurrent_remote_updates saturn_leaf "$NODES"
-run_benchmark "gesto_benchmarks_migration_partial_free_concurrent_remote_updates"
+# ################
+# ## GESTO_FULL ##
+# ################
+# scripts/update_leaf_src.sh gesto_partial_concurrent_remote_updates saturn_leaf "$NODES"
+# run_benchmark "gesto_benchmarks_migration_partial_free_concurrent_remote_updates"
 
 # Reset the percentiles calculation in the migrations
 mv src/basho_bench_stats_writer_csv.erl.OLD src/basho_bench_stats_writer_csv.erl

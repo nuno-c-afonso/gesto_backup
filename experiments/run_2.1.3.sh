@@ -23,7 +23,8 @@ add_ssh_key="eval \"\$(ssh-agent -s)\"; ssh-add .ssh/$KEYNAME"
 function run_benchmark {
     driver=$1
     tree_file=$2
-    ssh -t $machine "$add_ssh_key; cd basho_bench; scripts/benchmark_manager.sh $BUCKET_FILE_DC $tree_file $driver 10 70 20 10 0 90"
+    # ssh -t $machine "$add_ssh_key; cd basho_bench; scripts/benchmark_manager.sh $BUCKET_FILE_DC $tree_file $driver 10 70 20 10 0 90"
+    ssh -t $machine "$add_ssh_key; cd basho_bench; scripts/benchmark_manager.sh $BUCKET_FILE_DC $tree_file $driver 10 90 0 10 90 0"
 }
 
 # Store the starting point
@@ -44,17 +45,17 @@ ssh $machine "cd basho_bench/scripts; cp $BROKER_FILE $BROKER_FILE_TEMP"
 # Leave just the first internal (located in Lyon)
 ssh $machine "cd basho_bench/scripts; cat $BROKER_FILE_TEMP | head -n 1 > $BROKER_FILE"
 
-###########
-## GESTO ##
-###########
-scripts/update_leaf_src.sh gesto_partial_concurrent saturn_leaf "$NODES"
-run_benchmark "gesto_benchmarks_migration_partial_free_concurrent" $TREE_FILE
+# ###########
+# ## GESTO ##
+# ###########
+# scripts/update_leaf_src.sh gesto_partial_concurrent saturn_leaf "$NODES"
+# run_benchmark "gesto_benchmarks_migration_partial_free_concurrent" $TREE_FILE
 
-##############
-## EVENTUAL ##
-##############
-scripts/update_leaf_src.sh eventual saturn_leaf "$NODES"
-run_benchmark "saturn_benchmarks_da_eventual" $TREE_FILE
+# ##############
+# ## EVENTUAL ##
+# ##############
+# scripts/update_leaf_src.sh eventual saturn_leaf "$NODES"
+# run_benchmark "saturn_benchmarks_da_eventual" $TREE_FILE
 
 # Restore the original manager state
 ssh $machine "cd basho_bench/scripts; mv $BROKER_FILE_TEMP $BROKER_FILE"

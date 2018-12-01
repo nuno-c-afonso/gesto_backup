@@ -20,24 +20,37 @@ function run_benchmark {
     driver=$1
     all_leaves=$(ssh $machine 'cat basho_bench/scripts/leafs')
 
-    # Iterate until there is one replica per location
-    counter=$MIN_REPLICAS
-    while [ $counter -le $MAX_REPLICAS ]
-    do
-        # Recover iteration variables
-        let file_index=counter-MIN_REPLICAS
-        bucket_file="${FILE_PREFIX[$file_index]}${BUCKET_FILE_SUFFIX}"
-        tree_file="${FILE_PREFIX[$file_index]}${TREE_FILE_SUFFIX}"
-        test_leaves=$(echo "$all_leaves" | head -$counter)
+    # For knowing the saturation point of Occult
+    # n_clients=5
+    # max_clients=25
+    # while [ $n_clients -le $max_clients ]
+    # do
+    #     ssh -t $machine "sed -i \"s/N_CLIENTS=[0-9]*/N_CLIENTS=$n_clients/g\" basho_bench/scripts/benchmark_manager.sh"
 
-        # Change the available leaves at the manager
-        ssh $machine "echo '$test_leaves' > basho_bench/scripts/leafs"
+        # Iterate until there is one replica per location
+        counter=$MIN_REPLICAS
+        while [ $counter -le $MAX_REPLICAS ]
+        do
+            # Recover iteration variables
+            let file_index=counter-MIN_REPLICAS
+            bucket_file="${FILE_PREFIX[$file_index]}${BUCKET_FILE_SUFFIX}"
+            tree_file="${FILE_PREFIX[$file_index]}${TREE_FILE_SUFFIX}"
+            test_leaves=$(echo "$all_leaves" | head -$counter)
 
-        # Run the test
-        ssh -t $machine "$add_ssh_key; cd basho_bench; scripts/benchmark_manager.sh $bucket_file $tree_file $driver 10 70 20 10 0 90"
+            # Change the available leaves at the manager
+            ssh $machine "echo '$test_leaves' > basho_bench/scripts/leafs"
 
-        let counter++
-    done
+            # Run the test
+            # ssh -t $machine "$add_ssh_key; cd basho_bench; scripts/benchmark_manager.sh $bucket_file $tree_file $driver 10 70 20 10 0 90"
+            # ssh -t $machine "$add_ssh_key; cd basho_bench; scripts/benchmark_manager.sh $bucket_file $tree_file $driver 0 80 20 0 0 100"
+            ssh -t $machine "$add_ssh_key; cd basho_bench; scripts/benchmark_manager.sh $bucket_file $tree_file $driver 10 90 0 10 90 0"
+            # ssh -t $machine "$add_ssh_key; cd basho_bench; scripts/benchmark_manager.sh $bucket_file $tree_file $driver 0 100 0 0 100 0"
+
+            let counter++
+        done
+
+    #     let n_clients++
+    # done
 }
 
 # Store the starting point
