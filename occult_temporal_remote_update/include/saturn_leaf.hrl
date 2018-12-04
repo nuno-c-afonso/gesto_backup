@@ -61,4 +61,4 @@
 -define(PERCENTILES, 100).
 
 %% Temporal compression causal timestamp size
--define(VECTOR_SIZE, 20).
+-define(VECTOR_SIZE, 10).

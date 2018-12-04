@@ -59,3 +59,7 @@
 %-define(STALENESS, mock_stats_handler).
 -define(STALENESS, stats_cdf_handler).
 -define(PERCENTILES, 100).
+
+%% Temporal compression causal timestamp size
+% -define(VECTOR_SIZE, 20). %% Original value
+-define(VECTOR_SIZE, 10).
